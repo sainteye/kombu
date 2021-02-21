@@ -1,19 +1,23 @@
 from __future__ import absolute_import
+from __future__ import with_statement
 
 import pickle
 
-from kombu import Connection, Exchange, Producer, Queue, binding
+from mock import call
+
+from kombu import Connection, Exchange, Queue, binding
 from kombu.exceptions import NotBoundError
 
-from .case import Case, Mock, call
 from .mocks import Transport
+from .utils import TestCase
+from .utils import Mock
 
 
 def get_conn():
     return Connection(transport=Transport)
 
 
-class test_binding(Case):
+class test_binding(TestCase):
 
     def test_constructor(self):
         x = binding(
@@ -56,7 +60,7 @@ class test_binding(Case):
         self.assertIn('rkey', repr(b))
 
 
-class test_Exchange(Case):
+class test_Exchange(TestCase):
 
     def test_bound(self):
         exchange = Exchange('foo', 'direct')
@@ -91,7 +95,7 @@ class test_Exchange(Case):
         e3 = Exchange('foo', 'topic')
         self.assertNotEqual(e1, e3)
 
-        self.assertEqual(e1.__eq__(True), NotImplemented)
+        self.assertFalse(e1.__eq__(True))
 
     def test_revive(self):
         exchange = Exchange('foo', 'direct')
@@ -184,7 +188,7 @@ class test_Exchange(Case):
         self.assertIn('exchange_unbind', chan)
 
 
-class test_Queue(Case):
+class test_Queue(TestCase):
 
     def setUp(self):
         self.exchange = Exchange('foo', 'direct')
@@ -193,11 +197,6 @@ class test_Queue(Case):
         self.assertEqual(hash(Queue('a')), hash(Queue('a')))
         self.assertNotEqual(hash(Queue('a')), hash(Queue('b')))
 
-    def test_repr_with_bindings(self):
-        ex = Exchange('foo')
-        x = Queue('foo', bindings=[ex.binding('A'), ex.binding('B')])
-        self.assertTrue(repr(x))
-
     def test_anonymous(self):
         chan = Mock()
         x = Queue(bindings=[binding(Exchange('foo'), 'rkey')])
@@ -205,36 +204,6 @@ class test_Queue(Case):
         xx = x(chan)
         xx.declare()
         self.assertEqual(xx.name, 'generated')
-
-    def test_basic_get__accept_disallowed(self):
-        conn = Connection('memory://')
-        q = Queue('foo', exchange=self.exchange)
-        p = Producer(conn)
-        p.publish(
-            {'complex': object()},
-            declare=[q], exchange=self.exchange, serializer='pickle',
-        )
-
-        message = q(conn).get(no_ack=True)
-        self.assertIsNotNone(message)
-
-        with self.assertRaises(q.ContentDisallowed):
-            message.decode()
-
-    def test_basic_get__accept_allowed(self):
-        conn = Connection('memory://')
-        q = Queue('foo', exchange=self.exchange)
-        p = Producer(conn)
-        p.publish(
-            {'complex': object()},
-            declare=[q], exchange=self.exchange, serializer='pickle',
-        )
-
-        message = q(conn).get(accept=['pickle'], no_ack=True)
-        self.assertIsNotNone(message)
-
-        payload = message.decode()
-        self.assertTrue(payload['complex'])
 
     def test_when_bound_but_no_exchange(self):
         q = Queue('a')
@@ -291,7 +260,7 @@ class test_Queue(Case):
         q1 = Queue('xxx', Exchange('xxx', 'direct'), 'xxx')
         q2 = Queue('xxx', Exchange('xxx', 'direct'), 'xxx')
         self.assertEqual(q1, q2)
-        self.assertEqual(q1.__eq__(True), NotImplemented)
+        self.assertFalse(q1.__eq__(True))
 
         q3 = Queue('yyy', Exchange('xxx', 'direct'), 'xxx')
         self.assertNotEqual(q1, q3)

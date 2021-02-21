@@ -1,8 +1,10 @@
 from __future__ import absolute_import
 
+from nose import SkipTest
+
 from kombu import Connection
 
-from kombu.tests.case import Case, SkipTest, skip_if_not_module
+from kombu.tests.utils import TestCase, skip_if_not_module
 
 
 class MockConnection(dict):
@@ -11,7 +13,7 @@ class MockConnection(dict):
         self[key] = value
 
 
-class test_mongodb(Case):
+class test_mongodb(TestCase):
 
     @skip_if_not_module('pymongo')
     def test_url_parser(self):

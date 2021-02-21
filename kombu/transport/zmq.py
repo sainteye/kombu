@@ -11,15 +11,17 @@ import errno
 import os
 import socket
 
+from cPickle import loads, dumps
+from Queue import Empty
+
 try:
     import zmq
     from zmq import ZMQError
 except ImportError:
     zmq = ZMQError = None  # noqa
 
-from kombu.five import Empty
+from kombu.exceptions import StdConnectionError, StdChannelError
 from kombu.log import get_logger
-from kombu.serialization import pickle
 from kombu.utils import cached_property
 from kombu.utils.eventio import poll, READ
 
@@ -30,8 +32,6 @@ logger = get_logger('kombu.transport.zmq')
 DEFAULT_PORT = 5555
 DEFAULT_HWM = 128
 DEFAULT_INCR = 1
-
-dumps, loads = pickle.dumps, pickle.loads
 
 
 class MultiChannelPoller(object):
@@ -71,16 +71,16 @@ class MultiChannelPoller(object):
         for channel in self._channels:
             self._register(channel)
 
-    def on_readable(self, fileno):
+    def handle_event(self, fileno, event):
         chan = self._fd_to_chan[fileno]
-        return chan.drain_events(), chan
+        return (chan.drain_events(), chan)
 
     def get(self, timeout=None):
         self.on_poll_start()
 
         events = self.poller.poll(timeout)
-        for fileno, _ in events or []:
-            return self.on_readable(fileno)
+        for fileno, event in events or []:
+            return self.handle_event(fileno, event)
 
         raise Empty()
 
@@ -90,7 +90,6 @@ class MultiChannelPoller(object):
 
 
 class Client(object):
-
     def __init__(self, uri='tcp://127.0.0.1', port=DEFAULT_PORT,
                  hwm=DEFAULT_HWM, swap_size=None, enable_sink=True,
                  context=None):
@@ -100,7 +99,6 @@ class Client(object):
             scheme = 'tcp'
             parts = uri
         endpoints = parts.split(';')
-        self.port = port
 
         if scheme != 'tcp':
             raise NotImplementedError('Currently only TCP can be used')
@@ -109,7 +107,7 @@ class Client(object):
 
         if enable_sink:
             self.sink = self.context.socket(zmq.PULL)
-            self.sink.bind('tcp://*:{0.port}'.format(self))
+            self.sink.bind('tcp://*:%s' % port)
         else:
             self.sink = None
 
@@ -135,19 +133,11 @@ class Client(object):
         self.vent.connect(endpoint)
 
     def get(self, queue=None, timeout=None):
-        sink = self.sink
         try:
-            if timeout is not None:
-                prev_timeout, sink.RCVTIMEO = sink.RCVTIMEO, timeout
-                try:
-                    return sink.recv()
-                finally:
-                    sink.RCVTIMEO = prev_timeout
-            else:
-                return sink.recv()
-        except ZMQError as exc:
-            if exc.errno == zmq.EAGAIN:
-                raise socket.error(errno.EAGAIN, exc.strerror)
+            return self.sink.recv(flags=zmq.NOBLOCK)
+        except ZMQError, e:
+            if e.errno == zmq.EAGAIN:
+                raise socket.error(errno.EAGAIN, e.strerror)
             else:
                 raise
 
@@ -193,7 +183,7 @@ class Channel(virtual.Channel):
     def _get(self, queue, timeout=None):
         try:
             return loads(self.client.get(queue, timeout))
-        except socket.error as exc:
+        except socket.error, exc:
             if exc.errno == errno.EAGAIN and timeout != 0:
                 raise Empty()
             else:
@@ -238,15 +228,16 @@ class Channel(virtual.Channel):
 class Transport(virtual.Transport):
     Channel = Channel
 
-    can_parse_url = True
     default_port = DEFAULT_PORT
     driver_type = 'zeromq'
     driver_name = 'zmq'
 
-    connection_errors = virtual.Transport.connection_errors + (ZMQError, )
+    connection_errors = (StdConnectionError, ZMQError,)
+    channel_errors = (StdChannelError, )
 
     supports_ev = True
     polling_interval = None
+    nb_keep_draining = True
 
     def __init__(self, *args, **kwargs):
         if zmq is None:
@@ -257,30 +248,25 @@ class Transport(virtual.Transport):
     def driver_version(self):
         return zmq.__version__
 
-    def register_with_event_loop(self, connection, loop):
+    def on_poll_init(self, poller):
+        self.cycle.poller = poller
+
+    def on_poll_start(self):
         cycle = self.cycle
-        cycle.poller = loop.poller
-        add_reader = loop.add_reader
-        on_readable = self.on_readable
+        cycle.on_poll_start()
+        return dict((fd, self.handle_event) for fd in cycle.fds)
 
-        cycle_poll_start = cycle.on_poll_start
-
-        def on_poll_start():
-            cycle_poll_start()
-            [add_reader(fd, on_readable, fd) for fd in cycle.fds]
-
-        loop.on_tick.add(on_poll_start)
-
-    def on_readable(self, fileno):
-        self._handle_event(self.cycle.on_readable(fileno))
+    def handle_event(self, fileno, event):
+        evt = self.cycle.handle_event(fileno, event)
+        self._handle_event(evt)
 
     def drain_events(self, connection, timeout=None):
         more_to_read = False
         for channel in connection.channels:
             try:
                 evt = channel.cycle.get(timeout=timeout)
-            except socket.error as exc:
-                if exc.errno == errno.EAGAIN:
+            except socket.error, e:
+                if e.errno == errno.EAGAIN:
                     continue
                 raise
             else:
@@ -294,7 +280,7 @@ class Transport(virtual.Transport):
         message, queue = item
         if not queue or queue not in self._callbacks:
             raise KeyError(
-                'Message for queue {0!r} without consumers: {1}'.format(
+                "Received message for queue '%s' without consumers: %s" % (
                     queue, message))
         self._callbacks[queue](message)
 

@@ -1,13 +1,16 @@
 from __future__ import absolute_import
+from __future__ import with_statement
 
 import tempfile
 
+from nose import SkipTest
+
 from kombu import Connection, Exchange, Queue, Consumer, Producer
 
-from kombu.tests.case import Case, SkipTest
+from kombu.tests.utils import TestCase
 
 
-class test_FilesystemTransport(Case):
+class test_FilesystemTransport(TestCase):
 
     def setUp(self):
         try:

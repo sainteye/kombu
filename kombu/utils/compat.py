@@ -5,36 +5,33 @@ kombu.utils.compat
 Helps compatibility with older Python versions.
 
 """
-from __future__ import absolute_import
+############## py3k #########################################################
+import sys
+is_py3k = sys.version_info[0] == 3
 
+if is_py3k:                                 # pragma: no cover
+    from io import StringIO, BytesIO
+    from .encoding import bytes_to_str
 
-############## timedelta_seconds() -> delta.total_seconds ####################
-from datetime import timedelta
+    class WhateverIO(StringIO):
 
-HAVE_TIMEDELTA_TOTAL_SECONDS = hasattr(timedelta, 'total_seconds')
+        def write(self, data):
+            StringIO.write(self, bytes_to_str(data))
+else:
+    from StringIO import StringIO           # noqa
+    BytesIO = WhateverIO = StringIO         # noqa
 
-
-if HAVE_TIMEDELTA_TOTAL_SECONDS:   # pragma: no cover
-
-    def timedelta_seconds(delta):
-        """Convert :class:`datetime.timedelta` to seconds.
-
-        Doesn't account for negative values.
-
-        """
-        return max(delta.total_seconds(), 0)
-
-else:  # pragma: no cover
-
-    def timedelta_seconds(delta):  # noqa
-        """Convert :class:`datetime.timedelta` to seconds.
-
-        Doesn't account for negative values.
-
-        """
-        if delta.days < 0:
-            return 0
-        return delta.days * 86400 + delta.seconds + (delta.microseconds / 10e5)
+############## __builtins__.next #############################################
+try:
+    next = next
+except NameError:
+    def next(it, *args):  # noqa
+        try:
+            return it.next()
+        except StopIteration:
+            if not args:
+                raise
+            return args[0]
 
 ############## socket.error.errno ############################################
 
@@ -59,51 +56,88 @@ try:
 except ImportError:
     from ordereddict import OrderedDict  # noqa
 
-############## time.monotonic ################################################
+############## queue.LifoQueue ##############################################
+from Queue import Queue
 
-import platform
-SYSTEM = platform.system()
 
-if SYSTEM == 'Darwin':
-    import ctypes
-    libSystem = ctypes.CDLL('libSystem.dylib')
-    CoreServices = ctypes.CDLL(
-        '/System/Library/Frameworks/CoreServices.framework/CoreServices',
-        use_errno=True,
-    )
-    mach_absolute_time = libSystem.mach_absolute_time
-    mach_absolute_time.restype = ctypes.c_uint64
-    absolute_to_nanoseconds = CoreServices.AbsoluteToNanoseconds
-    absolute_to_nanoseconds.restype = ctypes.c_uint64
-    absolute_to_nanoseconds.argtypes = [ctypes.c_uint64]
+class LifoQueue(Queue):
 
-    def monotonic():
-        return absolute_to_nanoseconds(mach_absolute_time()) * 1e-9
-elif SYSTEM == 'Linux':
-    # from stackoverflow:
-    # questions/1205722/how-do-i-get-monotonic-time-durations-in-python
-    import ctypes
-    import os
+    def _init(self, maxsize):
+        self.queue = []
+        self.maxsize = maxsize
 
-    CLOCK_MONOTONIC = 1  # see <linux/time.h>
+    def _qsize(self, len=len):
+        return len(self.queue)
 
-    class timespec(ctypes.Structure):
-        _fields_ = [
-            ('tv_sec', ctypes.c_long),
-            ('tv_nsec', ctypes.c_long),
-        ]
+    def _put(self, item):
+        self.queue.append(item)
 
-    librt = ctypes.CDLL('librt.so.1', use_errno=True)
-    clock_gettime = librt.clock_gettime
-    clock_gettime.argtypes = [
-        ctypes.c_int, ctypes.POINTER(timespec),
-    ]
+    def _get(self):
+        return self.queue.pop()
 
-    def monotonic():  # noqa
-        t = timespec()
-        if clock_gettime(CLOCK_MONOTONIC, ctypes.pointer(t)) != 0:
-            errno_ = ctypes.get_errno()
-            raise OSError(errno_, os.strerror(errno_))
-        return t.tv_sec + t.tv_nsec * 1e-9
+############## logging.handlers.WatchedFileHandler ##########################
+import logging
+import os
+import platform as _platform
+
+from stat import ST_DEV, ST_INO
+
+if _platform.system() == 'Windows':
+    #since windows doesn't go with WatchedFileHandler use FileHandler instead
+    WatchedFileHandler = logging.FileHandler
 else:
-    from time import time as monotonic  # noqa
+    try:
+        from logging.handlers import WatchedFileHandler
+    except ImportError:
+        class WatchedFileHandler(logging.FileHandler):  # noqa
+            """
+            A handler for logging to a file, which watches the file
+            to see if it has changed while in use. This can happen because of
+            usage of programs such as newsyslog and logrotate which perform
+            log file rotation. This handler, intended for use under Unix,
+            watches the file to see if it has changed since the last emit.
+            (A file has changed if its device or inode have changed.)
+            If it has changed, the old file stream is closed, and the file
+            opened to get a new stream.
+
+            This handler is not appropriate for use under Windows, because
+            under Windows open files cannot be moved or renamed - logging
+            opens the files with exclusive locks - and so there is no need
+            for such a handler. Furthermore, ST_INO is not supported under
+            Windows; stat always returns zero for this value.
+
+            This handler is based on a suggestion and patch by Chad J.
+            Schroeder.
+            """
+            def __init__(self, *args, **kwargs):
+                logging.FileHandler.__init__(self, *args, **kwargs)
+
+                if not os.path.exists(self.baseFilename):
+                    self.dev, self.ino = -1, -1
+                else:
+                    stat = os.stat(self.baseFilename)
+                    self.dev, self.ino = stat[ST_DEV], stat[ST_INO]
+
+            def emit(self, record):
+                """
+                Emit a record.
+
+                First check if the underlying file has changed, and if it
+                has, close the old stream and reopen the file to get the
+                current stream.
+                """
+                if not os.path.exists(self.baseFilename):
+                    stat = None
+                    changed = 1
+                else:
+                    stat = os.stat(self.baseFilename)
+                    changed = ((stat[ST_DEV] != self.dev) or
+                               (stat[ST_INO] != self.ino))
+                if changed and self.stream is not None:
+                    self.stream.flush()
+                    self.stream.close()
+                    self.stream = self._open()
+                    if stat is None:
+                        stat = os.stat(self.baseFilename)
+                    self.dev, self.ino = stat[ST_DEV], stat[ST_INO]
+                logging.FileHandler.emit(self, record)

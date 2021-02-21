@@ -6,6 +6,7 @@ Generic process mailbox.
 
 """
 from __future__ import absolute_import
+from __future__ import with_statement
 
 import socket
 import warnings
@@ -20,14 +21,12 @@ from . import Exchange, Queue, Consumer, Producer
 from .clocks import LamportClock
 from .common import maybe_declare, oid_from
 from .exceptions import InconsistencyError
-from .five import range
-from .log import get_logger
-from .utils import cached_property, kwdict, uuid, reprcall
+from .utils import cached_property, kwdict, uuid
 
 REPLY_QUEUE_EXPIRES = 10
 
 W_PIDBOX_IN_USE = """\
-A node named {node.hostname} is already using this process mailbox!
+A node named %(hostname)r is already using this process mailbox!
 
 Maybe you forgot to shutdown the other node or did not do so properly?
 Or if you meant to start multiple nodes on the same host please make sure
@@ -35,8 +34,6 @@ you give each node a unique node name!
 """
 
 __all__ = ['Node', 'Mailbox']
-logger = get_logger(__name__)
-debug, error = logger.debug, logger.error
 
 
 class Node(object):
@@ -67,25 +64,24 @@ class Node(object):
             handlers = {}
         self.handlers = handlers
 
-    def Consumer(self, channel=None, no_ack=True, accept=None, **options):
+    def Consumer(self, channel=None, **options):
+        options.setdefault('no_ack', True)
+        options.setdefault('accept', self.mailbox.accept)
         queue = self.mailbox.get_queue(self.hostname)
 
         def verify_exclusive(name, messages, consumers):
             if consumers:
-                warnings.warn(W_PIDBOX_IN_USE.format(node=self))
+                warnings.warn(W_PIDBOX_IN_USE % {'hostname': self.hostname})
         queue.on_declared = verify_exclusive
 
-        return Consumer(
-            channel or self.channel, [queue], no_ack=no_ack,
-            accept=self.mailbox.accept if accept is None else accept,
-            **options
-        )
+        return Consumer(channel or self.channel, [queue], **options)
 
     def handler(self, fun):
         self.handlers[fun.__name__] = fun
         return fun
 
     def listen(self, channel=None, callback=None):
+        callback = callback or self.handle_message
         consumer = self.Consumer(channel=channel,
                                  callbacks=[callback or self.handle_message])
         consumer.consume()
@@ -94,15 +90,12 @@ class Node(object):
     def dispatch(self, method, arguments=None,
                  reply_to=None, ticket=None, **kwargs):
         arguments = arguments or {}
-        debug('pidbox received method %s [reply_to:%s ticket:%s]',
-              reprcall(method, (), kwargs=arguments), reply_to, ticket)
         handle = reply_to and self.handle_call or self.handle_cast
         try:
             reply = handle(method, kwdict(arguments))
         except SystemExit:
             raise
-        except Exception as exc:
-            error('pidbox command error: %r', exc, exc_info=1)
+        except Exception, exc:
             reply = {'error': repr(exc)}
 
         if reply_to:
@@ -154,9 +147,6 @@ class Mailbox(object):
     #: exchange to send replies to.
     reply_exchange = None
 
-    #: Only accepts json messages by default.
-    accept = ['json']
-
     def __init__(self, namespace,
                  type='direct', connection=None, clock=None, accept=None):
         self.namespace = namespace
@@ -167,7 +157,7 @@ class Mailbox(object):
         self.reply_exchange = self._get_reply_exchange(self.namespace)
         self._tls = local()
         self.unclaimed = defaultdict(deque)
-        self.accept = self.accept if accept is None else accept
+        self.accept = accept
 
     def __call__(self, connection):
         bound = copy(self)
@@ -220,7 +210,7 @@ class Mailbox(object):
                      auto_delete=True)
 
     def _publish_reply(self, reply, exchange, routing_key, ticket,
-                       channel=None, **opts):
+                       channel=None):
         chan = channel or self.connection.default_channel
         exchange = Exchange(exchange, exchange_type='direct',
                             delivery_mode='transient',
@@ -232,7 +222,6 @@ class Mailbox(object):
                 declare=[exchange], headers={
                     'ticket': ticket, 'clock': self.clock.forward(),
                 },
-                **opts
             )
         except InconsistencyError:
             pass   # queue probably deleted and no one is expecting a reply.
@@ -253,7 +242,7 @@ class Mailbox(object):
         producer.publish(
             message, exchange=exchange.name, declare=[exchange],
             headers={'clock': self.clock.forward(),
-                     'expires': time() + timeout if timeout else 0},
+                     'expires': time() + timeout if timeout else None},
         )
 
     def _broadcast(self, command, arguments=None, destination=None,
@@ -262,8 +251,8 @@ class Mailbox(object):
         if destination is not None and \
                 not isinstance(destination, (list, tuple)):
             raise ValueError(
-                'destination must be a list/tuple not {0}'.format(
-                    type(destination)))
+                'destination must be a list/tuple not %s' % (
+                    type(destination), ))
 
         arguments = arguments or {}
         reply_ticket = reply and uuid() or None

@@ -1,13 +1,14 @@
 from __future__ import absolute_import
+from __future__ import with_statement
 
 import socket
 
 from kombu import Connection, Exchange, Queue, Consumer, Producer
 
-from kombu.tests.case import Case
+from kombu.tests.utils import TestCase
 
 
-class test_MemoryTransport(Case):
+class test_MemoryTransport(TestCase):
 
     def setUp(self):
         self.c = Connection(transport='memory')
@@ -18,14 +19,6 @@ class test_MemoryTransport(Case):
         self.q2 = Queue('test_transport_memory2',
                         exchange=self.e,
                         routing_key='test_transport_memory2')
-        self.fanout = Exchange('test_transport_memory_fanout', type='fanout')
-        self.q3 = Queue('test_transport_memory_fanout1',
-                        exchange=self.fanout)
-        self.q4 = Queue('test_transport_memory_fanout2',
-                        exchange=self.fanout)
-
-    def test_driver_version(self):
-        self.assertTrue(self.c.transport.driver_version())
 
     def test_produce_consume_noack(self):
         channel = self.c.channel()
@@ -49,21 +42,6 @@ class test_MemoryTransport(Case):
             self.c.drain_events()
 
         self.assertEqual(len(_received), 10)
-
-    def test_produce_consume_fanout(self):
-        producer = self.c.Producer()
-        consumer = self.c.Consumer([self.q3, self.q4])
-
-        producer.publish(
-            {'hello': 'world'},
-            declare=consumer.queues,
-            exchange=self.fanout,
-        )
-
-        self.assertEqual(self.q3(self.c).get().payload, {'hello': 'world'})
-        self.assertEqual(self.q4(self.c).get().payload, {'hello': 'world'})
-        self.assertIsNone(self.q3(self.c).get())
-        self.assertIsNone(self.q4(self.c).get())
 
     def test_produce_consume(self):
         channel = self.c.channel()

@@ -1,10 +1,9 @@
-from __future__ import absolute_import
-
+from urllib import unquote
+from urlparse import urlparse
 try:
-    from urllib.parse import unquote, urlparse, parse_qsl
-except ImportError:
-    from urllib import unquote                  # noqa
-    from urlparse import urlparse, parse_qsl    # noqa
+    from urlparse import parse_qsl
+except ImportError:  # pragma: no cover
+    from cgi import parse_qsl  # noqa
 
 from . import kwdict
 

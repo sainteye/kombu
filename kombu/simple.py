@@ -10,17 +10,17 @@ from __future__ import absolute_import
 import socket
 
 from collections import deque
+from time import time
+from Queue import Empty
 
 from . import entity
 from . import messaging
 from .connection import maybe_channel
-from .five import Empty, monotonic
 
 __all__ = ['SimpleQueue', 'SimpleBuffer']
 
 
 class SimpleBase(object):
-    Empty = Empty
     _consuming = False
 
     def __enter__(self):
@@ -45,21 +45,21 @@ class SimpleBase(object):
         elapsed = 0.0
         remaining = timeout
         while True:
-            time_start = monotonic()
+            time_start = time()
             if self.buffer:
                 return self.buffer.pop()
             try:
                 self.channel.connection.client.drain_events(
                     timeout=timeout and remaining)
             except socket.timeout:
-                raise self.Empty()
-            elapsed += monotonic() - time_start
+                raise Empty()
+            elapsed += time() - time_start
             remaining = timeout and timeout - elapsed or None
 
     def get_nowait(self):
         m = self.queue.get(no_ack=self.no_ack)
         if not m:
-            raise self.Empty()
+            raise Empty()
         return m
 
     def put(self, message, serializer=None, headers=None, compression=None,
@@ -93,15 +93,14 @@ class SimpleBase(object):
         """`len(self) -> self.qsize()`"""
         return self.qsize()
 
-    def __bool__(self):
+    def __nonzero__(self):
         return True
-    __nonzero__ = __bool__
 
 
 class SimpleQueue(SimpleBase):
     no_ack = False
     queue_opts = {}
-    exchange_opts = {'type': 'direct'}
+    exchange_opts = {}
 
     def __init__(self, channel, name, no_ack=None, queue_opts=None,
                  exchange_opts=None, serializer=None,
@@ -112,7 +111,7 @@ class SimpleQueue(SimpleBase):
         if no_ack is None:
             no_ack = self.no_ack
         if not isinstance(queue, entity.Queue):
-            exchange = entity.Exchange(name, **exchange_opts)
+            exchange = entity.Exchange(name, 'direct', **exchange_opts)
             queue = entity.Queue(name, exchange, name, **queue_opts)
         else:
             name = queue.name

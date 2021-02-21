@@ -10,6 +10,8 @@ from __future__ import absolute_import
 import socket
 import string
 
+from Queue import Empty
+
 from anyjson import loads, dumps
 
 import boto
@@ -21,7 +23,7 @@ from boto.sdb.connection import SDBConnection
 from boto.sqs.connection import SQSConnection
 from boto.sqs.message import Message
 
-from kombu.five import Empty, range, text_t
+from kombu.exceptions import StdConnectionError, StdChannelError
 from kombu.utils import cached_property, uuid
 from kombu.utils.encoding import safe_str
 
@@ -163,7 +165,7 @@ class Channel(virtual.Channel):
 
     def entity_name(self, name, table=CHARS_REPLACE_TABLE):
         """Format AMQP queue name into a legal SQS queue name."""
-        return text_t(safe_str(name)).translate(table)
+        return unicode(safe_str(name)).translate(table)
 
     def _new_queue(self, queue, **kwargs):
         """Ensures a queue exists in SQS."""
@@ -217,7 +219,7 @@ class Channel(virtual.Channel):
         super(Channel, self).exchange_delete(exchange, **kwargs)
 
     def _has_queue(self, queue, **kwargs):
-        """Return True if ``queue`` was previously declared."""
+        """Returns True if ``queue`` has been previously declared."""
         if self.supports_fanout:
             return bool(self.table.get_queue(queue))
         return super(Channel, self)._has_queue(queue)
@@ -270,16 +272,16 @@ class Channel(virtual.Channel):
         super(Channel, self).basic_ack(delivery_tag)
 
     def _size(self, queue):
-        """Return the number of messages in a queue."""
+        """Returns the number of messages in a queue."""
         return self._new_queue(queue).count()
 
     def _purge(self, queue):
-        """Delete all current messages in a queue."""
+        """Deletes all current messages in a queue."""
         q = self._new_queue(queue)
         # SQS is slow at registering messages, so run for a few
         # iterations to ensure messages are deleted.
         size = 0
-        for i in range(10):
+        for i in xrange(10):
             size += q.count()
             if not size:
                 break
@@ -292,7 +294,7 @@ class Channel(virtual.Channel):
             if conn:
                 try:
                     conn.close()
-                except AttributeError as exc:  # FIXME ???
+                except AttributeError, exc:  # FIXME ???
                     if "can't set attribute" not in str(exc):
                         raise
 
@@ -371,12 +373,7 @@ class Transport(virtual.Transport):
     polling_interval = 0
     wait_time_seconds = 20
     default_port = None
-    connection_errors = (
-        virtual.Transport.connection_errors +
-        (exception.SQSError, socket.error)
-    )
-    channel_errors = (
-        virtual.Transport.channel_errors + (exception.SQSDecodeError, )
-    )
+    connection_errors = (StdConnectionError, exception.SQSError, socket.error)
+    channel_errors = (exception.SQSDecodeError, StdChannelError)
     driver_type = 'sqs'
     driver_name = 'sqs'

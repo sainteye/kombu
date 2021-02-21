@@ -7,9 +7,6 @@ Built-in transports.
 """
 from __future__ import absolute_import
 
-from collections import Callable
-
-from kombu.five import string_t
 from kombu.syn import _detect_environment
 from kombu.utils import symbol_by_name
 
@@ -18,10 +15,10 @@ def supports_librabbitmq():
     if _detect_environment() == 'default':
         try:
             import librabbitmq  # noqa
-        except ImportError:  # pragma: no cover
-            pass
-        else:                # pragma: no cover
             return True
+        except ImportError:
+            pass
+    return False
 
 
 def _ghettoq(name, new, alias=None):
@@ -29,16 +26,16 @@ def _ghettoq(name, new, alias=None):
 
     def __inner():
         import warnings
-        _new = isinstance(xxx, Callable) and xxx() or xxx
-        gtransport = 'ghettoq.taproot.{0}'.format(name)
-        ktransport = 'kombu.transport.{0}.Transport'.format(_new)
+        _new = callable(xxx) and xxx() or xxx
+        gtransport = 'ghettoq.taproot.%s' % name
+        ktransport = 'kombu.transport.%s.Transport' % _new
         this = alias or name
         warnings.warn("""
     Ghettoq does not work with Kombu, but there is now a built-in version
-    of the {0} transport.
+    of the %s transport.
 
-    You should replace {1!r} with: {2!r}
-        """.format(name, gtransport, this))
+    You should replace %r with simply: %r
+        """ % (name, gtransport, this))
         return ktransport
 
     return __inner
@@ -59,8 +56,6 @@ TRANSPORT_ALIASES = {
     'django': 'kombu.transport.django:Transport',
     'sqlalchemy': 'kombu.transport.sqlalchemy:Transport',
     'sqla': 'kombu.transport.sqlalchemy:Transport',
-    'SLMQ': 'kombu.transport.SLMQ.Transport',
-    'slmq': 'kombu.transport.SLMQ.Transport',
     'ghettoq.taproot.Redis': _ghettoq('Redis', 'redis', 'redis'),
     'ghettoq.taproot.Database': _ghettoq('Database', 'django', 'django'),
     'ghettoq.taproot.MongoDB': _ghettoq('MongoDB', 'mongodb'),
@@ -76,7 +71,7 @@ _transport_cache = {}
 
 
 def resolve_transport(transport=None):
-    if isinstance(transport, string_t):
+    if isinstance(transport, basestring):
         try:
             transport = TRANSPORT_ALIASES[transport]
         except KeyError:
@@ -85,11 +80,11 @@ def resolve_transport(transport=None):
                 alt = fmatch_best(transport, TRANSPORT_ALIASES)
                 if alt:
                     raise KeyError(
-                        'No such transport: {0}.  Did you mean {1}?'.format(
+                        'No such transport: %s.  Did you mean %s?' % (
                             transport, alt))
-                raise KeyError('No such transport: {0}'.format(transport))
+                raise KeyError('No such transport: %s' % transport)
         else:
-            if isinstance(transport, Callable):
+            if callable(transport):
                 transport = transport()
         return symbol_by_name(transport)
     return transport

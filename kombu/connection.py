@@ -6,31 +6,29 @@ Broker connection and pools.
 
 """
 from __future__ import absolute_import
+from __future__ import with_statement
 
+import errno
 import os
 import socket
 
-from collections import Callable
 from contextlib import contextmanager
 from functools import partial
 from itertools import count, cycle
-from operator import itemgetter
-try:
-    from urllib.parse import quote
-except ImportError:  # Py2
-    from urllib import quote  # noqa
+from urllib import quote
+from Queue import Empty
 
 # jython breaks on relative import for .exceptions for some reason
 # (Issue #112)
 from kombu import exceptions
-from .async import get_event_loop
-from .five import Empty, range, string_t, text_t, LifoQueue as _LifoQueue
 from .log import get_logger
 from .transport import get_transport_cls, supports_librabbitmq
 from .utils import cached_property, retry_over_time, shufflecycle
-from .utils.compat import OrderedDict
-from .utils.functional import lazy
-from .utils.url import parse_url, urlparse
+from .utils.compat import (
+    OrderedDict, LifoQueue as _LifoQueue, next, get_errno,
+)
+from .utils.functional import promise
+from .utils.url import parse_url
 
 __all__ = ['Connection', 'ConnectionPool', 'ChannelPool']
 
@@ -39,6 +37,10 @@ RESOLVE_ALIASES = {'pyamqp': 'amqp',
 
 _LOG_CONNECTION = os.environ.get('KOMBU_LOG_CONNECTION', False)
 _LOG_CHANNEL = os.environ.get('KOMBU_LOG_CHANNEL', False)
+
+#: List of URI schemes that should not be parsed, but sent
+#: directly to the transport instead.
+URI_PASSTHROUGH = frozenset(['sqla', 'sqlalchemy', 'zeromq', 'zmq'])
 
 logger = get_logger(__name__)
 roundrobin_failover = cycle
@@ -123,6 +125,10 @@ class Connection(object):
     #: in case the server loses data.
     declared_entities = None
 
+    #: This is set to True if there is still more data to read
+    #: after a call to :meth:`drain_nowait`.
+    more_to_read = False
+
     #: Iterator returning the next broker URL to try in the event
     #: of connection failure (initialized by :attr:`failover_strategy`).
     cycle = None
@@ -157,7 +163,7 @@ class Connection(object):
             'login_method': login_method, 'heartbeat': heartbeat
         }
 
-        if hostname and not isinstance(hostname, string_t):
+        if hostname and not isinstance(hostname, basestring):
             alt.extend(hostname)
             hostname = alt[0]
         if hostname and '://' in hostname:
@@ -168,14 +174,9 @@ class Connection(object):
                 # e.g. sqla+mysql://root:masterkey@localhost/
                 params['transport'], params['hostname'] = \
                     hostname.split('+', 1)
-                transport = self.uri_prefix = params['transport']
+                self.uri_prefix = params['transport']
             else:
-                transport = transport or urlparse(hostname).scheme
-                if get_transport_cls(transport).can_parse_url:
-                    # set the transport so that the default is not used.
-                    params['transport'] = transport
-                else:
-                    # we must parse the URL
+                if transport not in URI_PASSTHROUGH:
                     params.update(parse_url(hostname))
         self._init_params(**params)
 
@@ -186,6 +187,9 @@ class Connection(object):
         if self.alt:
             self.cycle = self.failover_strategy(self.alt)
             next(self.cycle)  # skip first entry
+
+        # backend_cls argument will be removed shortly.
+        self.transport_cls = self.transport_cls or kwargs.get('backend_cls')
 
         if transport_options is None:
             transport_options = {}
@@ -230,13 +234,10 @@ class Connection(object):
         self.transport_cls = transport
         self.heartbeat = heartbeat and float(heartbeat)
 
-    def register_with_event_loop(self, loop):
-        self.transport.register_with_event_loop(self.connection, loop)
-
     def _debug(self, msg, *args, **kwargs):
+        fmt = '[Kombu connection:0x%(id)x] %(msg)s'
         if self._logger:  # pragma: no cover
-            fmt = '[Kombu connection:0x{id:x}] {msg}'
-            logger.debug(fmt.format(id=id(self), msg=text_t(msg)),
+            logger.debug(fmt % {'id': id(self), 'msg': unicode(msg)},
                          *args, **kwargs)
 
     def connect(self):
@@ -251,11 +252,11 @@ class Connection(object):
         if _LOG_CHANNEL:  # pragma: no cover
             from .utils.debug import Logwrapped
             return Logwrapped(chan, 'kombu.channel',
-                              '[Kombu channel:{0.channel_id}] ')
+                              '[Kombu channel:%(channel_id)s] ')
         return chan
 
     def heartbeat_check(self, rate=2):
-        """Verify that heartbeats are sent and received.
+        """Verify that hartbeats are sent and received.
 
         If the current transport does not support heartbeats then
         this is a noop operation.
@@ -272,12 +273,33 @@ class Connection(object):
         """Wait for a single event from the server.
 
         :keyword timeout: Timeout in seconds before we give up.
+            Raises :exc:`socket.timeout` if the timeout is exceeded.
 
-
-        :raises :exc:`socket.timeout`: if the timeout is exceeded.
+        Usually used from an event loop.
 
         """
         return self.transport.drain_events(self.connection, **kwargs)
+
+    def drain_nowait(self, *args, **kwargs):
+        """Non-blocking version of :meth:`drain_events`.
+
+        Sets :attr:`more_to_read` if there is more data to read.
+        The application MUST call this method until this is unset, and before
+        calling select/epoll/kqueue's poll() again.
+
+        """
+        try:
+            self.drain_events(timeout=0)
+        except socket.timeout:
+            self.more_to_read = False
+            return False
+        except socket.error, exc:
+            if get_errno(exc) in (errno.EAGAIN, errno.EINTR):
+                self.more_to_read = False
+                return False
+            raise
+        self.more_to_read = True
+        return True
 
     def maybe_close_channel(self, channel):
         """Close given channel, but ignore connection and channel errors."""
@@ -287,7 +309,7 @@ class Connection(object):
             pass
 
     def _do_close_self(self):
-        # Close only connection and channel(s), but not transport.
+        # Closes only the connection and channel(s) not transport.
         self.declared_entities.clear()
         if self._default_channel:
             self.maybe_close_channel(self._default_channel)
@@ -375,7 +397,7 @@ class Connection(object):
         return self
 
     def completes_cycle(self, retries):
-        """Return true if the cycle is complete after number of `retries`."""
+        """Returns true if the cycle is complete after number of `retries`."""
         return not (retries + 1) % len(self.alt) if self.alt else True
 
     def revive(self, new_channel):
@@ -417,8 +439,8 @@ class Connection(object):
         This is an example ensuring a publish operation::
 
             >>> def errback(exc, interval):
-            ...     print('Cannot publish message: {0!r}. '
-                          'Retry in {1}s'.format(exc, interval))
+            ...     print("Couldn't publish message: %r. Retry in %ds" % (
+            ...             exc, interval))
             >>> publish = conn.ensure(producer, producer.publish,
             ...                       errback=errback, max_retries=3)
             >>> publish(message, routing_key)
@@ -426,20 +448,11 @@ class Connection(object):
         """
         def _ensured(*args, **kwargs):
             got_connection = 0
-            conn_errors = self.recoverable_connection_errors
-            chan_errors = self.recoverable_channel_errors
-            has_modern_errors = hasattr(
-                self.transport, 'recoverable_connection_errors',
-            )
             for retries in count(0):  # for infinity
                 try:
                     return fun(*args, **kwargs)
-                except conn_errors as exc:
-                    if got_connection and not has_modern_errors:
-                        # transport can not distinguish between
-                        # recoverable/irrecoverable errors, so we propagate
-                        # the error if it persists after a new connection was
-                        # successfully established.
+                except self.recoverable_connection_errors, exc:
+                    if got_connection:
                         raise
                     if max_retries is not None and retries > max_retries:
                         raise
@@ -461,7 +474,7 @@ class Connection(object):
                     if on_revive:
                         on_revive(new_channel)
                     got_connection += 1
-                except chan_errors as exc:
+                except self.recoverable_channel_errors, exc:
                     if max_retries is not None and retries > max_retries:
                         raise
                     self._debug('ensure channel error: %r', exc, exc_info=1)
@@ -505,18 +518,20 @@ class Connection(object):
             def __call__(self, *args, **kwargs):
                 if channels[0] is None:
                     self.revive(create_channel())
-                return fun(*args, channel=channels[0], **kwargs), channels[0]
+                kwargs['channel'] = channels[0]
+                return fun(*args, **kwargs), channels[0]
 
         revive = Revival()
         return self.ensure(revive, revive, **ensure_options)
 
     def create_transport(self):
         return self.get_transport_cls()(client=self)
+    create_backend = create_transport   # FIXME
 
     def get_transport_cls(self):
         """Get the currently used transport class."""
         transport_cls = self.transport_cls
-        if not transport_cls or isinstance(transport_cls, string_t):
+        if not transport_cls or isinstance(transport_cls, basestring):
             transport_cls = get_transport_cls(transport_cls)
         return transport_cls
 
@@ -535,22 +550,23 @@ class Connection(object):
         if self.uri_prefix:
             hostname = '%s+%s' % (self.uri_prefix, hostname)
 
-        info = (
-            ('hostname', hostname),
-            ('userid', self.userid or D.get('userid')),
-            ('password', self.password or D.get('password')),
-            ('virtual_host', self.virtual_host or D.get('virtual_host')),
-            ('port', self.port or D.get('port')),
-            ('insist', self.insist),
-            ('ssl', self.ssl),
-            ('transport', transport_cls),
-            ('connect_timeout', self.connect_timeout),
-            ('transport_options', self.transport_options),
-            ('login_method', self.login_method or D.get('login_method')),
-            ('uri_prefix', self.uri_prefix),
-            ('heartbeat', self.heartbeat),
-            ('alternates', self.alt),
-        )
+        info = (('hostname', hostname),
+                ('userid', self.userid or D.get('userid')),
+                ('password', self.password or D.get('password')),
+                ('virtual_host', self.virtual_host or D.get('virtual_host')),
+                ('port', self.port or D.get('port')),
+                ('insist', self.insist),
+                ('ssl', self.ssl),
+                ('transport', transport_cls),
+                ('connect_timeout', self.connect_timeout),
+                ('transport_options', self.transport_options),
+                ('login_method', self.login_method or D.get('login_method')),
+                ('uri_prefix', self.uri_prefix),
+                ('heartbeat', self.heartbeat))
+
+        if self.alt:
+            info += (('alternates', self.alt),)
+
         return info
 
     def info(self):
@@ -562,31 +578,29 @@ class Connection(object):
             self.transport_cls, self.hostname, self.userid,
             self.password, self.virtual_host, self.port))
 
-    def as_uri(self, include_password=False, mask=''):
+    def as_uri(self, include_password=False):
         """Convert connection parameters to URL form."""
-        hostname = self.hostname or 'localhost'
-        if self.transport.can_parse_url:
-            if self.uri_prefix:
-                return '%s+%s' % (self.uri_prefix, hostname)
-            return self.hostname
+        if self.transport_cls in URI_PASSTHROUGH:
+            return self.transport_cls + '+' + (self.hostname or 'localhost')
         quoteS = partial(quote, safe='')   # strict quote
         fields = self.info()
-        port, userid, password, transport = itemgetter(
-            'port', 'userid', 'password', 'transport'
-        )(fields)
+        port = fields['port']
+        userid = fields['userid']
+        password = fields['password']
+        transport = fields['transport']
         url = '%s://' % transport
-        if userid or password:
-            if userid:
-                url += quoteS(userid)
-            if password:
-                if include_password:
-                    url += ':' + quoteS(password)
-                else:
-                    url += ':' + mask if mask else ''
+        if userid:
+            url += quoteS(userid)
+            if include_password and password:
+                url += ':' + quoteS(password)
             url += '@'
         url += quoteS(fields['hostname'])
-        if port:
-            url += ':%s' % (port, )
+
+        # If the transport equals 'mongodb' the
+        # hostname contains a full mongodb connection
+        # URI. Let pymongo retreive the port from there.
+        if port and transport != 'mongodb':
+            url += ':' + str(port)
 
         url += '/' + quote(fields['virtual_host'])
         if self.uri_prefix:
@@ -676,8 +690,10 @@ class Connection(object):
         :keyword exchange_opts: Additional keyword arguments passed to the
           constructor of the automatically created
           :class:`~kombu.Exchange`.
-        :keyword channel: Custom channel to use. If not specified the
-            connection default channel is used.
+        :keyword channel: Channel to use. If not specified a new channel
+           from the current connection will be used. Remember to call
+           :meth:`~kombu.simple.SimpleQueue.close` when done with the
+           object.
 
         """
         from .simple import SimpleQueue
@@ -702,22 +718,19 @@ class Connection(object):
     def _establish_connection(self):
         self._debug('establishing connection...')
         conn = self.transport.establish_connection()
-        loop = get_event_loop()
-        if loop:
-            self.transport.register_with_event_loop(conn, loop)
-        self._debug('connection established: %r', conn)
+        self._debug('connection established: %r' % (conn, ))
         return conn
 
     def __repr__(self):
         """``x.__repr__() <==> repr(x)``"""
-        return '<Connection: {0} at 0x{1:x}>'.format(self.as_uri(), id(self))
+        return '<Connection: %s at 0x%x>' % (self.as_uri(), id(self))
 
     def __copy__(self):
         """``x.__copy__() <==> copy(x)``"""
         return self.clone()
 
     def __reduce__(self):
-        return self.__class__, tuple(self.info().values()), None
+        return (self.__class__, tuple(self.info().values()), None)
 
     def __enter__(self):
         return self
@@ -727,7 +740,7 @@ class Connection(object):
 
     @property
     def connected(self):
-        """Return true if the connection has been established."""
+        """Returns true if the connection has been established."""
         return (not self._closed and
                 self._connection is not None and
                 self.transport.verify_connection(self._connection))
@@ -787,8 +800,6 @@ class Connection(object):
 
     @cached_property
     def recoverable_connection_errors(self):
-        """List of connection related exceptions that can be recovered from,
-        but where the connection must be closed and re-established first."""
         try:
             return self.transport.recoverable_connection_errors
         except AttributeError:
@@ -800,8 +811,6 @@ class Connection(object):
 
     @cached_property
     def recoverable_channel_errors(self):
-        """List of channel related exceptions that can be automatically
-        recovered from without re-establishing the connection."""
         try:
             return self.transport.recoverable_channel_errors
         except AttributeError:
@@ -816,6 +825,12 @@ class Connection(object):
     def channel_errors(self):
         """List of exceptions that may be raised by the channel."""
         return self.transport.channel_errors
+
+    @property
+    def eventmap(self):
+        """Map of events to be registered in an eventloop for this connection
+        to be used in non-blocking fashion."""
+        return self.transport.eventmap(self.connection)
 
     @property
     def supports_heartbeats(self):
@@ -871,7 +886,7 @@ class Resource(object):
                     try:
                         R = self.prepare(R)
                     except BaseException:
-                        if isinstance(R, lazy):
+                        if isinstance(R, promise):
                             # no evaluated yet, just put it back
                             self._resource.put_nowait(R)
                         else:
@@ -924,7 +939,7 @@ class Resource(object):
         pass
 
     def force_close_all(self):
-        """Close and remove all resources in the pool (also those in use).
+        """Closes and removes all resources in the pool (also those in use).
 
         Can be used to close resources from parent processes
         after fork (e.g. sockets/connections).
@@ -963,10 +978,10 @@ class Resource(object):
         def acquire(self, *args, **kwargs):  # noqa
             import traceback
             id = self._next_resource_id = self._next_resource_id + 1
-            print('+{0} ACQUIRE {1}'.format(id, self.__class__.__name__))
+            print('+%s ACQUIRE %s' % (id, self.__class__.__name__, ))
             r = self._orig_acquire(*args, **kwargs)
             r._resource_id = id
-            print('-{0} ACQUIRE {1}'.format(id, self.__class__.__name__))
+            print('-%s ACQUIRE %s' % (id, self.__class__.__name__, ))
             if not hasattr(r, 'acquired_by'):
                 r.acquired_by = []
             r.acquired_by.append(traceback.format_stack())
@@ -974,9 +989,9 @@ class Resource(object):
 
         def release(self, resource):  # noqa
             id = resource._resource_id
-            print('+{0} RELEASE {1}'.format(id, self.__class__.__name__))
+            print('+%s RELEASE %s' % (id, self.__class__.__name__, ))
             r = self._orig_release(resource)
-            print('-{0} RELEASE {1}'.format(id, self.__class__.__name__))
+            print('-%s RELEASE %s' % (id, self.__class__.__name__, ))
             self._next_resource_id -= 1
             return r
 
@@ -1011,16 +1026,16 @@ class ConnectionPool(Resource):
 
     def setup(self):
         if self.limit:
-            for i in range(self.limit):
+            for i in xrange(self.limit):
                 if i < self.preload:
                     conn = self.new()
                     conn.connect()
                 else:
-                    conn = lazy(self.new)
+                    conn = promise(self.new)
                 self._resource.put_nowait(conn)
 
     def prepare(self, resource):
-        if isinstance(resource, Callable):
+        if callable(resource):
             resource = resource()
         resource._debug('acquired')
         return resource
@@ -1035,24 +1050,24 @@ class ChannelPool(Resource):
                                           preload=preload)
 
     def new(self):
-        return lazy(self.connection.channel)
+        return promise(self.connection.channel)
 
     def setup(self):
         channel = self.new()
         if self.limit:
-            for i in range(self.limit):
+            for i in xrange(self.limit):
                 self._resource.put_nowait(
-                    i < self.preload and channel() or lazy(channel))
+                    i < self.preload and channel() or promise(channel))
 
     def prepare(self, channel):
-        if isinstance(channel, Callable):
+        if callable(channel):
             channel = channel()
         return channel
 
 
 def maybe_channel(channel):
-    """Return the default channel if argument is a connection instance,
-    otherwise just return the channel given."""
+    """Returns channel, or returns the default_channel if it's a
+    connection."""
     if isinstance(channel, Connection):
         return channel.default_channel
     return channel

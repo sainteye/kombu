@@ -9,15 +9,16 @@ from __future__ import absolute_import
 
 from itertools import count
 
-from .compression import compress
 from .connection import maybe_channel, is_connection
 from .entity import Exchange, Queue, DELIVERY_MODES
-from .exceptions import ContentDisallowed
-from .five import int_types, text_t, values
-from .serialization import dumps, prepare_accept_content
+from .compression import compress
+from .serialization import encode, prepare_accept_content
 from .utils import ChannelPromise, maybe_list
 
 __all__ = ['Exchange', 'Queue', 'Producer', 'Consumer']
+
+# XXX compat attribute
+entry_to_queue = Queue.from_dict
 
 
 class Producer(object):
@@ -80,9 +81,6 @@ class Producer(object):
 
         if self._channel:
             self.revive(self._channel)
-
-    def __repr__(self):
-        return '<Producer: {0.channel}>'.format(self)
 
     def __reduce__(self):
         return self.__class__, self.__reduce_args__()
@@ -150,7 +148,7 @@ class Producer(object):
             exchange = exchange.name
         else:
             delivery_mode = delivery_mode or self.exchange.delivery_mode
-        if not isinstance(delivery_mode, int_types):
+        if not isinstance(delivery_mode, (int, long)):
             delivery_mode = DELIVERY_MODES[delivery_mode]
         properties['delivery_mode'] = delivery_mode
 
@@ -232,11 +230,11 @@ class Producer(object):
         if not content_type:
             serializer = serializer or self.serializer
             (content_type, content_encoding,
-             body) = dumps(body, serializer=serializer)
+             body) = encode(body, serializer=serializer)
         else:
             # If the programmer doesn't want us to serialize,
             # make sure content_encoding is set.
-            if isinstance(body, text_t):
+            if isinstance(body, unicode):
                 if not content_encoding:
                     content_encoding = 'utf-8'
                 body = body.encode(content_encoding)
@@ -271,8 +269,6 @@ class Consumer(object):
     :keyword on_decode_error: see :attr:`on_decode_error`.
 
     """
-    ContentDisallowed = ContentDisallowed
-
     #: The connection/channel to use for this consumer.
     channel = None
 
@@ -335,7 +331,7 @@ class Consumer(object):
     #: in which case only json is allowed.
     accept = None
 
-    _tags = count(1)   # global
+    _next_tag = count(1).next   # global
 
     def __init__(self, channel, queues=None, no_ack=None, auto_declare=None,
                  callbacks=None, on_decode_error=None, on_message=None,
@@ -450,7 +446,7 @@ class Consumer(object):
 
         """
         cancel = self.channel.basic_cancel
-        for tag in values(self._active_tags):
+        for tag in self._active_tags.itervalues():
             cancel(tag)
         self._active_tags.clear()
     close = cancel
@@ -466,7 +462,7 @@ class Consumer(object):
             self.channel.basic_cancel(tag)
 
     def consuming_from(self, queue):
-        """Return :const:`True` if the consumer is currently
+        """Returns :const:`True` if the consumer is currently
         consuming from queue'."""
         name = queue
         if isinstance(queue, Queue):
@@ -567,7 +563,7 @@ class Consumer(object):
         return tag
 
     def _add_tag(self, queue, consumer_tag=None):
-        tag = consumer_tag or str(next(self._tags))
+        tag = consumer_tag or str(self._next_tag())
         self._active_tags[queue.name] = tag
         return tag
 
@@ -581,7 +577,7 @@ class Consumer(object):
             if accept is not None:
                 message.accept = accept
             decoded = None if on_m else message.decode()
-        except Exception as exc:
+        except Exception, exc:
             if not self.on_decode_error:
                 raise
             self.on_decode_error(message, exc)
@@ -589,7 +585,7 @@ class Consumer(object):
             return on_m(message) if on_m else self.receive(decoded, message)
 
     def __repr__(self):
-        return '<Consumer: {0.queues}>'.format(self)
+        return '<Consumer: %s>' % (self.queues, )
 
     @property
     def connection(self):

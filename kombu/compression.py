@@ -34,7 +34,7 @@ def register(encoder, decoder, content_type, aliases=[]):
 
 
 def encoders():
-    """Return a list of available compression methods."""
+    """Returns a list of available compression methods."""
     return list(_encoders)
 
 

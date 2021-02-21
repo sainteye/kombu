@@ -4,19 +4,21 @@ kombu.transport.mongodb
 
 MongoDB transport.
 
-:copyright: (c) 2010 - 2013 by Flavio Percoco Premoli.
+:copyright: (c) 2010 - 2012 by Flavio Percoco Premoli.
 :license: BSD, see LICENSE for more details.
 
 """
 from __future__ import absolute_import
 
+from Queue import Empty
+
 import pymongo
 
 from pymongo import errors
 from anyjson import loads, dumps
-from pymongo import MongoClient
+from pymongo.connection import Connection
 
-from kombu.five import Empty
+from kombu.exceptions import StdConnectionError, StdChannelError
 
 from . import virtual
 
@@ -47,7 +49,7 @@ class Channel(virtual.Channel):
     def _get(self, queue):
         try:
             if queue in self._fanout_queues:
-                msg = next(self._queue_cursors[queue])
+                msg = self._queue_cursors[queue].next()
                 self._queue_readcounts[queue] += 1
                 return loads(msg['payload'])
             else:
@@ -56,7 +58,7 @@ class Channel(virtual.Channel):
                     query={'queue': queue},
                     sort={'_id': pymongo.ASCENDING}, remove=True,
                 )
-        except errors.OperationFailure as exc:
+        except errors.OperationFailure, exc:
             if 'No matching object found' in exc.args[0]:
                 raise Empty()
             raise
@@ -89,6 +91,11 @@ class Channel(virtual.Channel):
             self.client.messages.remove({'queue': queue})
         return size
 
+    def close(self):
+        super(Channel, self).close()
+        if self._client:
+            self._client.connection.end_request()
+
     def _open(self):
         """
         See mongodb uri documentation:
@@ -98,35 +105,30 @@ class Channel(virtual.Channel):
         hostname = client.hostname or DEFAULT_HOST
         authdb = dbname = client.virtual_host
 
-        if dbname in ['/', None]:
+        if dbname in ["/", None]:
             dbname = "kombu_default"
             authdb = "admin"
-        if not hostname.startswith('mongodb://'):
-            hostname = 'mongodb://' + hostname
 
-        if not hostname[10:]:
-            hostname = hostname + 'localhost'
+        if not client.userid:
+            hostname = hostname.replace('/' + client.virtual_host, '/')
+        else:
+            hostname = hostname.replace('/' + client.virtual_host,
+                                        '/' + authdb)
 
-        if '/' in hostname[10:]:
-            if not client.userid:
-                hostname = hostname.replace('/' + client.virtual_host, '/')
-            else:
-                hostname = hostname.replace('/' + client.virtual_host,
-                                            '/' + authdb)
-
+        mongo_uri = 'mongodb://' + hostname
         # At this point we expect the hostname to be something like
         # (considering replica set form too):
         #
         #   mongodb://[username:password@]host1[:port1][,host2[:port2],
         #   ...[,hostN[:portN]]][/[?options]]
-        mongoconn = MongoClient(host=hostname, ssl=client.ssl)
+        mongoconn = Connection(host=mongo_uri, ssl=client.ssl)
         database = getattr(mongoconn, dbname)
 
         version = mongoconn.server_info()['version']
         if tuple(map(int, version.split('.')[:2])) < (1, 3):
             raise NotImplementedError(
-                'Kombu requires MongoDB version 1.3+ (server is {0})'.format(
-                    version))
+                'Kombu requires MongoDB version 1.3+, but connected to %s' % (
+                    version, ))
 
         self.db = database
         col = database.messages
@@ -195,17 +197,12 @@ class Channel(virtual.Channel):
 class Transport(virtual.Transport):
     Channel = Channel
 
-    can_parse_url = True
     polling_interval = 1
     default_port = DEFAULT_PORT
-    connection_errors = (
-        virtual.Transport.connection_errors + (errors.ConnectionFailure, )
-    )
-    channel_errors = (
-        virtual.Transport.channel_errors + (
-            errors.ConnectionFailure,
-            errors.OperationFailure)
-    )
+    connection_errors = (StdConnectionError, errors.ConnectionFailure)
+    channel_errors = (StdChannelError,
+                      errors.ConnectionFailure,
+                      errors.OperationFailure)
     driver_type = 'mongodb'
     driver_name = 'pymongo'
 

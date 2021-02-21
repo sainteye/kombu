@@ -1,13 +1,17 @@
 from __future__ import absolute_import
+from __future__ import with_statement
+
+from mock import patch
 
 from kombu import Connection, Exchange, Queue
 from kombu import compat
 
-from .case import Case, Mock, patch
 from .mocks import Transport, Channel
+from .utils import TestCase
+from .utils import Mock
 
 
-class test_misc(Case):
+class test_misc(TestCase):
 
     def test_iterconsume(self):
 
@@ -27,7 +31,7 @@ class test_misc(Case):
         conn = MyConnection()
         consumer = Consumer()
         it = compat._iterconsume(conn, consumer)
-        self.assertEqual(next(it), 1)
+        self.assertEqual(it.next(), 1)
         self.assertTrue(consumer.active)
 
         it2 = compat._iterconsume(conn, consumer, limit=10)
@@ -74,7 +78,7 @@ class test_misc(Case):
                          Queue.from_dict('foo', **dict(defs)))
 
 
-class test_Publisher(Case):
+class test_Publisher(TestCase):
 
     def setUp(self):
         self.connection = Connection(transport=Transport)
@@ -125,7 +129,7 @@ class test_Publisher(Case):
         self.assertTrue(pub._closed)
 
 
-class test_Consumer(Case):
+class test_Consumer(TestCase):
 
     def setUp(self):
         self.connection = Connection(transport=Transport)
@@ -216,8 +220,7 @@ class test_Consumer(Case):
             callback_called[0] = True
 
         c.backend.to_deliver.append('42')
-        payload = c.fetch().payload
-        self.assertEqual(payload, '42')
+        self.assertEqual(c.fetch().payload, '42')
         c.backend.to_deliver.append('46')
         c.register_callback(receive)
         self.assertEqual(c.fetch(enable_callbacks=True).payload, '46')
@@ -240,7 +243,7 @@ class test_Consumer(Case):
 
         c = C(self.connection,
               queue=n, exchange=n, routing_key='rkey')
-        self.assertEqual(c.wait(10), list(range(10)))
+        self.assertEqual(c.wait(10), range(10))
         c.close()
 
     def test_iterqueue(self, n='test_iterqueue'):
@@ -255,24 +258,14 @@ class test_Consumer(Case):
 
         c = C(self.connection,
               queue=n, exchange=n, routing_key='rkey')
-        self.assertEqual(list(c.iterqueue(limit=10)), list(range(10)))
+        self.assertEqual(list(c.iterqueue(limit=10)), range(10))
         c.close()
 
 
-class test_ConsumerSet(Case):
+class test_ConsumerSet(TestCase):
 
     def setUp(self):
         self.connection = Connection(transport=Transport)
-
-    def test_providing_channel(self):
-        chan = Mock(name='channel')
-        cs = compat.ConsumerSet(self.connection, channel=chan)
-        self.assertTrue(cs._provided_channel)
-        self.assertIs(cs.backend, chan)
-
-        cs.cancel = Mock(name='cancel')
-        cs.close()
-        self.assertFalse(chan.close.called)
 
     @patch('kombu.compat._iterconsume')
     def test_iterconsume(self, _iterconsume, n='test_iterconsume'):

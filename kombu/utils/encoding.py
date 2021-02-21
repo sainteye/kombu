@@ -13,34 +13,16 @@ from __future__ import absolute_import
 import sys
 import traceback
 
-from kombu.five import text_t
-
 is_py3k = sys.version_info >= (3, 0)
 
-#: safe_str takes encoding from this file by default.
-#: :func:`set_default_encoding_file` can used to set the
-#: default output file.
-default_encoding_file = None
+if sys.platform.startswith('java'):  # pragma: no cover
 
-
-def set_default_encoding_file(file):
-    global default_encoding_file
-    default_encoding_file = file
-
-
-def get_default_encoding_file():
-    return default_encoding_file
-
-
-if sys.platform.startswith('java'):     # pragma: no cover
-
-    def default_encoding(file=None):
+    def default_encoding():
         return 'utf-8'
 else:
 
-    def default_encoding(file=None):  # noqa
-        file = file or get_default_encoding_file()
-        return getattr(file, 'encoding', None) or sys.getfilesystemencoding()
+    def default_encoding():       # noqa
+        return sys.getdefaultencoding()
 
 if is_py3k:  # pragma: no cover
 
@@ -80,8 +62,8 @@ else:
     def from_utf8(s, *args, **kwargs):  # noqa
         return s.encode('utf-8', *args, **kwargs)
 
-    def default_encode(obj, file=None):            # noqa
-        return unicode(obj, default_encoding(file))
+    def default_encode(obj):            # noqa
+        return unicode(obj, default_encoding())
 
     str_t = unicode
     ensure_bytes = str_to_bytes
@@ -89,37 +71,34 @@ else:
 
 try:
     bytes_t = bytes
-except NameError:  # pragma: no cover
+except NameError:
     bytes_t = str  # noqa
 
 
 def safe_str(s, errors='replace'):
     s = bytes_to_str(s)
-    if not isinstance(s, (text_t, bytes)):
+    if not isinstance(s, basestring):
         return safe_repr(s, errors)
     return _safe_str(s, errors)
 
 
-if is_py3k:
-
-    def _safe_str(s, errors='replace', file=None):
+def _safe_str(s, errors='replace'):
+    if is_py3k:  # pragma: no cover
         if isinstance(s, str):
             return s
         try:
             return str(s)
-        except Exception as exc:
-            return '<Unrepresentable {0!r}: {1!r} {2!r}>'.format(
+        except Exception, exc:
+            return '<Unrepresentable %r: %r %r>' % (
                 type(s), exc, '\n'.join(traceback.format_stack()))
-else:
-    def _safe_str(s, errors='replace', file=None):  # noqa
-        encoding = default_encoding(file)
-        try:
-            if isinstance(s, unicode):
-                return s.encode(encoding, errors)
-            return unicode(s, encoding, errors)
-        except Exception as exc:
-            return '<Unrepresentable {0!r}: {1!r} {2!r}>'.format(
-                type(s), exc, '\n'.join(traceback.format_stack()))
+    encoding = default_encoding()
+    try:
+        if isinstance(s, unicode):
+            return s.encode(encoding, errors)
+        return unicode(s, encoding, errors)
+    except Exception, exc:
+        return '<Unrepresentable %r: %r %r>' % (
+            type(s), exc, '\n'.join(traceback.format_stack()))
 
 
 def safe_repr(o, errors='replace'):

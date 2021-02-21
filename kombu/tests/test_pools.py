@@ -1,14 +1,15 @@
-from __future__ import absolute_import
+from __future__ import with_statement
 
 from kombu import Connection, Producer
 from kombu import pools
 from kombu.connection import ConnectionPool
 from kombu.utils import eqhash
 
-from .case import Case, Mock
+from .utils import TestCase
+from .utils import Mock
 
 
-class test_ProducerPool(Case):
+class test_ProducerPool(TestCase):
     Pool = pools.ProducerPool
 
     class MyPool(pools.ProducerPool):
@@ -23,9 +24,6 @@ class test_ProducerPool(Case):
     def setUp(self):
         self.connections = Mock()
         self.pool = self.Pool(self.connections, limit=10)
-
-    def test_close_resource(self):
-        self.pool.close_resource(Mock(name='resource'))
 
     def test_releases_connection_when_Producer_raises(self):
         self.pool.Producer = Mock()
@@ -114,7 +112,7 @@ class test_ProducerPool(Case):
         self.assertIsNone(p.channel)
 
 
-class test_PoolGroup(Case):
+class test_PoolGroup(TestCase):
     Group = pools.PoolGroup
 
     class MyGroup(pools.PoolGroup):
@@ -208,7 +206,7 @@ class test_PoolGroup(Case):
         pools.set_limit(pools.get_limit())
 
 
-class test_fun_PoolGroup(Case):
+class test_fun_PoolGroup(TestCase):
 
     def test_connections_behavior(self):
         c1u = 'memory://localhost:123'

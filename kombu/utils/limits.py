@@ -5,9 +5,7 @@ kombu.utils.limits
 Token bucket implementation for rate limiting.
 
 """
-from __future__ import absolute_import
-
-from kombu.five import monotonic
+import time
 
 __all__ = ['TokenBucket']
 
@@ -38,10 +36,10 @@ class TokenBucket(object):
         self.capacity = float(capacity)
         self._tokens = capacity
         self.fill_rate = float(fill_rate)
-        self.timestamp = monotonic()
+        self.timestamp = time.time()
 
     def can_consume(self, tokens=1):
-        """Return :const:`True` if the number of tokens can be consumed
+        """Returns :const:`True` if `tokens` number of tokens can be consumed
         from the bucket."""
         if tokens <= self._get_tokens():
             self._tokens -= tokens
@@ -49,10 +47,12 @@ class TokenBucket(object):
         return False
 
     def expected_time(self, tokens=1):
-        """Return the time (in seconds) when a new token is expected
-        to be available.
+        """Returns the expected time in seconds when a new token should be
+        available.
 
-        This will also consume a token from the bucket.
+        .. admonition:: Warning
+
+            This consumes a token from the bucket.
 
         """
         _tokens = self._get_tokens()
@@ -61,7 +61,7 @@ class TokenBucket(object):
 
     def _get_tokens(self):
         if self._tokens < self.capacity:
-            now = monotonic()
+            now = time.time()
             delta = self.fill_rate * (now - self.timestamp)
             self._tokens = min(self.capacity, self._tokens + delta)
             self.timestamp = now

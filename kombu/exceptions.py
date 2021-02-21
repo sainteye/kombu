@@ -9,13 +9,10 @@ from __future__ import absolute_import
 
 import socket
 
-from amqp import ChannelError, ConnectionError, ResourceError
-
 __all__ = ['NotBoundError', 'MessageStateError', 'TimeoutError',
            'LimitExceeded', 'ConnectionLimitExceeded',
-           'ChannelLimitExceeded', 'ConnectionError',
-           'ChannelError', 'VersionMismatch', 'SerializerNotInstalled',
-           'ResourceError']
+           'ChannelLimitExceeded', 'StdConnectionError',
+           'StdChannelError', 'VersionMismatch', 'SerializerNotInstalled']
 
 TimeoutError = socket.timeout
 
@@ -49,6 +46,14 @@ class ChannelLimitExceeded(LimitExceeded):
     pass
 
 
+class StdConnectionError(KombuError):
+    pass
+
+
+class StdChannelError(KombuError):
+    pass
+
+
 class VersionMismatch(KombuError):
     pass
 
@@ -63,7 +68,7 @@ class ContentDisallowed(SerializerNotInstalled):
     pass
 
 
-class InconsistencyError(ConnectionError):
+class InconsistencyError(StdConnectionError):
     """Data or environment has been found to be inconsistent,
     depending on the cause it may be possible to retry the operation."""
     pass

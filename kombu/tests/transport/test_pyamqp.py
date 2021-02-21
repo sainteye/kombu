@@ -1,7 +1,10 @@
 from __future__ import absolute_import
+from __future__ import with_statement
 
 import sys
 
+from mock import patch
+from nose import SkipTest
 from itertools import count
 
 try:
@@ -11,9 +14,9 @@ except ImportError:
 else:
     from kombu.transport import pyamqp
 from kombu import Connection
-from kombu.five import nextfun
 
-from kombu.tests.case import Case, Mock, SkipTest, mask_modules, patch
+from kombu.tests.utils import TestCase
+from kombu.tests.utils import mask_modules, Mock
 
 
 class MockConnection(dict):
@@ -22,7 +25,7 @@ class MockConnection(dict):
         self[key] = value
 
 
-class test_Channel(Case):
+class test_Channel(TestCase):
 
     def setUp(self):
         if pyamqp is None:
@@ -41,7 +44,7 @@ class test_Channel(Case):
                 pass
 
         self.conn = Mock()
-        self.conn._get_free_channel_id.side_effect = nextfun(count(0))
+        self.conn._get_free_channel_id.side_effect = count(0).next
         self.conn.channels = {}
         self.channel = Channel(self.conn, 0)
 
@@ -78,7 +81,7 @@ class test_Channel(Case):
         self.assertNotIn('my-consumer-tag', self.channel.no_ack_consumers)
 
 
-class test_Transport(Case):
+class test_Transport(TestCase):
 
     def setUp(self):
         if pyamqp is None:
@@ -90,9 +93,6 @@ class test_Transport(Case):
         connection = Mock()
         self.transport.create_channel(connection)
         connection.channel.assert_called_with()
-
-    def test_driver_version(self):
-        self.assertTrue(self.transport.driver_version())
 
     def test_drain_events(self):
         connection = Mock()
@@ -134,7 +134,7 @@ class test_Transport(Case):
                 sys.modules['amqp.connection'] = pm
 
 
-class test_pyamqp(Case):
+class test_pyamqp(TestCase):
 
     def setUp(self):
         if pyamqp is None:
@@ -157,14 +157,18 @@ class test_pyamqp(Case):
         c = Connection(port=1337, transport=Transport).connect()
         self.assertEqual(c['host'], '127.0.0.1:1337')
 
-    def test_register_with_event_loop(self):
+    def test_eventmap(self):
         t = pyamqp.Transport(Mock())
-        conn = Mock(name='conn')
-        loop = Mock(name='loop')
-        t.register_with_event_loop(conn, loop)
-        loop.add_reader.assert_called_with(
-            conn.sock, t.on_readable, conn, loop,
+        conn = Mock()
+        self.assertDictEqual(
+            t.eventmap(conn),
+            {conn.sock: t.client.drain_nowait},
         )
+
+    def test_event_interface(self):
+        t = pyamqp.Transport(Mock())
+        t.on_poll_init(Mock())
+        t.on_poll_start()
 
     def test_heartbeat_check(self):
         t = pyamqp.Transport(Mock())

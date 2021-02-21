@@ -1,13 +1,15 @@
 from __future__ import absolute_import
+from __future__ import with_statement
 
 from kombu import Connection
 from kombu.transport.virtual import exchange
 
-from kombu.tests.case import Case, Mock
 from kombu.tests.mocks import Transport
+from kombu.tests.utils import TestCase
+from kombu.tests.utils import Mock
 
 
-class ExchangeCase(Case):
+class ExchangeCase(TestCase):
     type = None
 
     def setUp(self):

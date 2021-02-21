@@ -9,12 +9,19 @@ from __future__ import absolute_import
 
 import amqp
 
-from kombu.five import items
+from kombu.exceptions import (
+    StdConnectionError,
+    StdChannelError,
+    VersionMismatch,
+)
 from kombu.utils.amq_manager import get_manager
 
 from . import base
 
 DEFAULT_PORT = 5672
+
+if amqp.VERSION < (0, 9, 3):  # pragma: no cover
+    raise VersionMismatch('Please install amqp version 0.9.3 or higher.')
 
 
 class Message(base.Message):
@@ -38,16 +45,13 @@ class Channel(amqp.Channel, base.StdChannel):
 
     def prepare_message(self, body, priority=None,
                         content_type=None, content_encoding=None,
-                        headers=None, properties=None, _Message=amqp.Message):
-        """Prepares message so that it can be sent using this transport."""
-        return _Message(
-            body,
-            priority=priority,
-            content_type=content_type,
-            content_encoding=content_encoding,
-            application_headers=headers,
-            **properties
-        )
+                        headers=None, properties=None):
+        """Encapsulate data into a AMQP message."""
+        return amqp.Message(body, priority=priority,
+                            content_type=content_type,
+                            content_encoding=content_encoding,
+                            application_headers=headers,
+                            **properties)
 
     def message_to_python(self, raw_message):
         """Convert encoded message body back to a Python value."""
@@ -65,20 +69,20 @@ class Transport(base.Transport):
 
     # it's very annoying that pyamqp sometimes raises AttributeError
     # if the connection is lost, but nothing we can do about that here.
-    connection_errors = amqp.Connection.connection_errors
-    channel_errors = amqp.Connection.channel_errors
-    recoverable_connection_errors = \
-        amqp.Connection.recoverable_connection_errors
-    recoverable_channel_errors = amqp.Connection.recoverable_channel_errors
+    connection_errors = (
+        (StdConnectionError, ) + amqp.Connection.connection_errors
+    )
+    channel_errors = (StdChannelError, ) + amqp.Connection.channel_errors
 
+    nb_keep_draining = True
     driver_name = 'py-amqp'
     driver_type = 'amqp'
     supports_heartbeats = True
     supports_ev = True
 
-    def __init__(self, client, default_port=None, **kwargs):
+    def __init__(self, client, **kwargs):
         self.client = client
-        self.default_port = default_port or self.default_port
+        self.default_port = kwargs.get('default_port') or self.default_port
 
     def driver_version(self):
         return amqp.__version__
@@ -92,7 +96,7 @@ class Transport(base.Transport):
     def establish_connection(self):
         """Establish connection to the AMQP broker."""
         conninfo = self.client
-        for name, default_value in items(self.default_connection_params):
+        for name, default_value in self.default_connection_params.items():
             if not getattr(conninfo, name, None):
                 setattr(conninfo, name, default_value)
         if conninfo.hostname == 'localhost':
@@ -117,8 +121,14 @@ class Transport(base.Transport):
         connection.client = None
         connection.close()
 
-    def register_with_event_loop(self, connection, loop):
-        loop.add_reader(connection.sock, self.on_readable, connection, loop)
+    def eventmap(self, connection):
+        return {connection.sock: self.client.drain_nowait}
+
+    def on_poll_init(self, poller):
+        pass
+
+    def on_poll_start(self):
+        return {}
 
     def heartbeat_check(self, connection, rate=2):
         return connection.heartbeat_tick(rate=rate)

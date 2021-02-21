@@ -1,25 +1,30 @@
 from __future__ import absolute_import
+from __future__ import with_statement
 
 import warnings
 
+from mock import patch
+
 from kombu import Connection
-from kombu.exceptions import ResourceError, ChannelError
+from kombu.exceptions import StdChannelError
 from kombu.transport import virtual
 from kombu.utils import uuid
 from kombu.compression import compress
 
-from kombu.tests.case import Case, Mock, patch, redirect_stdouts
+from kombu.tests.compat import catch_warnings
+from kombu.tests.utils import TestCase
+from kombu.tests.utils import Mock, redirect_stdouts
 
 
 def client(**kwargs):
-    return Connection(transport='kombu.transport.virtual:Transport', **kwargs)
+    return Connection(transport='kombu.transport.virtual.Transport', **kwargs)
 
 
 def memory_client():
     return Connection(transport='memory')
 
 
-class test_BrokerState(Case):
+class test_BrokerState(TestCase):
 
     def test_constructor(self):
         s = virtual.BrokerState()
@@ -31,7 +36,7 @@ class test_BrokerState(Case):
         self.assertEqual(t.bindings, 32)
 
 
-class test_QoS(Case):
+class test_QoS(TestCase):
 
     def setUp(self):
         self.q = virtual.QoS(client().channel(), prefetch_count=10)
@@ -62,7 +67,7 @@ class test_QoS(Case):
         self.q.append(i + 1, uuid())
         self.assertFalse(self.q.can_consume())
 
-        tag1 = next(iter(self.q._delivered))
+        tag1 = iter(self.q._delivered).next()
         self.q.ack(tag1)
         self.assertTrue(self.q.can_consume())
 
@@ -97,7 +102,7 @@ class test_QoS(Case):
         self.assertEqual(self.q.get('foo'), 1)
 
 
-class test_Message(Case):
+class test_Message(TestCase):
 
     def test_create(self):
         c = client().channel()
@@ -129,7 +134,7 @@ class test_Message(Case):
         self.assertFalse('compression' in dict_['headers'])
 
 
-class test_AbstractChannel(Case):
+class test_AbstractChannel(TestCase):
 
     def test_get(self):
         with self.assertRaises(NotImplementedError):
@@ -170,7 +175,7 @@ class test_AbstractChannel(Case):
         self.assertTrue(cycle.called)
 
 
-class test_Channel(Case):
+class test_Channel(TestCase):
 
     def setUp(self):
         self.channel = client().channel()
@@ -178,14 +183,6 @@ class test_Channel(Case):
     def tearDown(self):
         if self.channel._qos is not None:
             self.channel._qos._on_collect.cancel()
-
-    def test_exceeds_channel_max(self):
-        c = client()
-        t = c.transport
-        avail = t._avail_channel_ids = Mock(name='_avail_channel_ids')
-        avail.pop.side_effect = IndexError()
-        with self.assertRaises(ResourceError):
-            virtual.Channel(t)
 
     def test_exchange_bind_interface(self):
         with self.assertRaises(NotImplementedError):
@@ -208,7 +205,7 @@ class test_Channel(Case):
     def test_exchange_declare(self):
         c = self.channel
 
-        with self.assertRaises(ChannelError):
+        with self.assertRaises(StdChannelError):
             c.exchange_declare('test_exchange_declare', 'direct',
                                durable=True, auto_delete=True, passive=True)
         c.exchange_declare('test_exchange_declare', 'direct',
@@ -383,7 +380,7 @@ class test_Channel(Case):
         exc = None
         try:
             raise KeyError()
-        except KeyError as exc_:
+        except KeyError, exc_:
             exc = exc_
         ru.return_value = [(exc, 1)]
 
@@ -414,7 +411,7 @@ class test_Channel(Case):
 
     def test_lookup__undeliverable(self, n='test_lookup__undeliverable'):
         warnings.resetwarnings()
-        with warnings.catch_warnings(record=True) as log:
+        with catch_warnings(record=True) as log:
             self.assertListEqual(
                 self.channel._lookup(n, n, 'ae.undeliver'),
                 ['ae.undeliver'],
@@ -488,11 +485,11 @@ class test_Channel(Case):
     def test_queue_declare_passive(self):
         has_queue = self.channel._has_queue = Mock()
         has_queue.return_value = False
-        with self.assertRaises(ChannelError):
+        with self.assertRaises(StdChannelError):
             self.channel.queue_declare(queue='21wisdjwqe', passive=True)
 
 
-class test_Transport(Case):
+class test_Transport(TestCase):
 
     def setUp(self):
         self.transport = client().transport
